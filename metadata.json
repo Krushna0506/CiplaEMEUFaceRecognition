@@ -1,0 +1,8 @@
+{
+  "name": "Cipla EventFace EMEU",
+  "description": "Face recognition system to find your moments in event photos.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": []
+}
