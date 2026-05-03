@@ -7,8 +7,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 
 dotenv.config();
-
 const app = express();
+app.use(cors({ origin: '*' }));
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));
@@ -307,7 +307,7 @@ async function startServer() {
       const files = Array.from(fileMap.entries()).map(([id, meta]) => ({
         id,
         // Proxy these for the frontend to avoid blank/CORS issues
-        url: `/api/proxy-image?id=${id}&original=true`, 
+        url: `/api/proxy-image?id=${id}&original=true`,
         thumb: `/api/proxy-image?id=${id}`,
         downloadUrl: `/api/download?id=${id}`,
         name: `moment_${id}`,
@@ -359,9 +359,9 @@ async function startServer() {
         const id = targetUrl.split('d/')[1]?.split('=')[0] || targetUrl.split('id=')[1];
         targetData = await fetchImage(`https://drive.google.com/thumbnail?id=${id}&sz=w800`);
       }
-      
+
       const targetBase64 = targetData.toString('base64');
-      
+
       // 2. Prepare the "Identity-Wide" JSON prompt
       const prompt = `
         You are a professional facial recognition assistant.
@@ -399,13 +399,13 @@ async function startServer() {
       };
 
       const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${geminiKey}`;
-      
+
       // --- DEEP SCAN AI CALL WITH RETRY LOGIC ---
       const callGemini = async (retryCount = 0): Promise<any> => {
         try {
           const response = await axios.post(geminiUrl, payload, { timeout: 35000 }); // Deep scan timeout
           const text = response.data?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-          
+
           // Use a more robust JSON cleaner to handle any markdown characters
           const cleaned = text.replace(/```json|```/g, '').trim();
           return JSON.parse(cleaned);
@@ -422,10 +422,10 @@ async function startServer() {
       const result = await callGemini();
       // Expert Precision Gate (70%)
       const isMatch = !!result.isMatch && (result.confidence >= 70);
-      
+
       const fileId = targetUrl.split('d/')[1]?.split('=')[0] || targetUrl.split('id=')[1]?.split('&')[0];
       console.log(`[High Analysis] ID: ${fileId} | Result: ${isMatch ? '✅ MATCH' : '❌ REJECTED'} (${result.confidence}%) | Reason: ${result.reason}`);
-      
+
       res.json({ isMatch, confidence: result.confidence, reason: result.reason });
 
     } catch (error: any) {
