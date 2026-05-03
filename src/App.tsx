@@ -64,7 +64,7 @@ export default function App() {
   // Load Models
   useEffect(() => {
     // Check if Google Drive API key is configured
-    fetch('/api/status').then(r => r.json()).then(d => setHasApiKey(d.hasApiKey)).catch(() => setHasApiKey(false));
+    fetch('https://ciplaemeufacerecognition.onrender.com/status').then(r => r.json()).then(d => setHasApiKey(d.hasApiKey)).catch(() => setHasApiKey(false));
 
     async function loadModels() {
       try {
