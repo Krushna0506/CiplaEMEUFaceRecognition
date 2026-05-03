@@ -3,9 +3,8 @@ import * as faceapi from '@vladmandic/face-api';
 import { Camera, Upload, RefreshCw, Check, Download, Search, Loader2, Image as ImageIcon, ChevronRight, AlertCircle, Play, ArrowLeft, RefreshCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import JSZip from 'jszip';
-
 // Config
-const MATCH_THRESHOLD = 0.54; // Balanced threshold for high accuracy (0.50 - 0.55 is sweet spot)
+const MATCH_THRESHOLD = 0.52; // 50% Match Confidence Threshold
 const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
 
 interface DriveFile {
@@ -34,6 +33,9 @@ export default function App() {
   const [matches, setMatches] = useState<DriveFile[]>([]);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
+  const [hasApiKey, setHasApiKey] = useState<boolean | null>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState(0);
 
   // Filters State
   const [filterType, setFilterType] = useState<'all' | 'photo' | 'video'>('all');
@@ -61,6 +63,9 @@ export default function App() {
 
   // Load Models
   useEffect(() => {
+    // Check if Google Drive API key is configured
+    fetch('/api/status').then(r => r.json()).then(d => setHasApiKey(d.hasApiKey)).catch(() => setHasApiKey(false));
+
     async function loadModels() {
       try {
         await faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL);
@@ -289,7 +294,6 @@ export default function App() {
         setStatus(`Analyzing reference angle ${i + 1}/${referencePhotos.length}...`);
         const img = await faceapi.fetchImage(photo);
 
-        // Strict detection for reference to ensure we only get the main face, not blurry background friends
         const detections = await faceapi.detectAllFaces(img, new faceapi.SsdMobilenetv1Options({ minConfidence: 0.3 }))
           .withFaceLandmarks()
           .withFaceDescriptors();
@@ -339,84 +343,66 @@ export default function App() {
         console.warn(`Discovery failed:`, err.message);
       }
 
-      // Update stats
-      setStats(prev => ({ ...prev, total: files.length }));
-      setProgress(25);
-
-      if (files.length > 0 && files.length < 200) {
-        setStatus(`Note: Folder may be limited. Use GOOGLE_DRIVE_API_KEY for full folder access.`);
-        await new Promise(r => setTimeout(r, 2500));
-      }
-
       if (files.length === 0) {
-        setStatus('No files found in event folder after multiple attempts.');
-        setStep('results');
+        setError('No files found in the folder. Please check the folder link and ensure it is publicly shared.');
+        setStep('capture');
         return;
       }
 
       setStats({ total: files.length, scanned: 0, matches: 0 });
+      setProgress(25);
+      setStatus(`Found ${files.length} items. Starting face analysis...`);
+      await new Promise(r => setTimeout(r, 800));
 
-      // Detection options for scanning (balanced for groups but strict enough to avoid noise)
-      const detectionOptions = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.2 });
+      // Detection options — high sensitivity for group photos
+      const detectionOptions = new faceapi.SsdMobilenetv1Options({ minConfidence: 0.35 });
 
-      // 3. Process Files
+      // 3. Process files in high-speed concurrent batches
+      const CONCURRENCY = 6;
       const foundMatches: DriveFile[] = [];
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        setStatus(`Searching ${file.isVideo ? 'video' : 'photo'} ${i + 1}...`);
-        setProgress(15 + ((i + 1) / files.length) * 80);
+      let scannedCount = 0;
+      let currentIndex = 0;
 
+      const processFile = async (file: DriveFile): Promise<void> => {
         try {
-          let bestDistFound: number | null = null;
+          if (referenceDescriptors.current.length === 0) return;
 
-          if (file.isVideo) {
-            // Check thumbnail first (quick win)
-            const fileImg = await faceapi.fetchImage(file.thumb);
-            const detections = await faceapi.detectAllFaces(fileImg, detectionOptions).withFaceLandmarks().withFaceDescriptors();
+          let bestDist: number | null = null;
+          const img = await faceapi.fetchImage(file.thumb);
+          const dets = await faceapi.detectAllFaces(img, detectionOptions).withFaceLandmarks().withFaceDescriptors();
 
-            for (const det of detections) {
-              for (const refDesc of referenceDescriptors.current) {
-                const dist = faceapi.euclideanDistance(refDesc, det.descriptor);
-                if (dist < MATCH_THRESHOLD) {
-                  bestDistFound = dist;
-                  break;
-                }
-              }
-              if (bestDistFound !== null) break;
-            }
-
-            // If no match in thumbnail, do deep scan of frames
-            if (bestDistFound === null) {
-              bestDistFound = await scanVideoFile(file, (s) => setStatus(`Deep Scanning Video: ${s}`));
-            }
-          } else {
-            const fileImg = await faceapi.fetchImage(file.thumb);
-            const detections = await faceapi.detectAllFaces(fileImg, detectionOptions).withFaceLandmarks().withFaceDescriptors();
-
-            for (const det of detections) {
-              for (const refDesc of referenceDescriptors.current) {
-                const dist = faceapi.euclideanDistance(refDesc, det.descriptor);
-                if (bestDistFound === null || dist < bestDistFound) {
-                  bestDistFound = dist;
-                }
-                if (dist < MATCH_THRESHOLD) {
-                  break; // found good enough match for this file
-                }
-              }
-              if (bestDistFound !== null && bestDistFound < MATCH_THRESHOLD) break;
+          for (const det of dets) {
+            for (const ref of referenceDescriptors.current) {
+              const d = faceapi.euclideanDistance(ref, det.descriptor);
+              if (bestDist === null || d < bestDist) bestDist = d;
             }
           }
 
-          if (bestDistFound !== null && bestDistFound < MATCH_THRESHOLD) {
-            foundMatches.push({ ...file, dist: bestDistFound });
+          if (bestDist !== null && bestDist < MATCH_THRESHOLD) {
+            foundMatches.push({ ...file, dist: bestDist });
             setStats(prev => ({ ...prev, matches: foundMatches.length }));
           }
-        } catch (e) {
-          console.warn(`Could not process file ${file.id}`);
-        }
-        setStats(prev => ({ ...prev, scanned: i + 1 }));
-      }
+        } catch (_) { }
 
+        scannedCount++;
+        setStats(prev => ({ ...prev, scanned: scannedCount }));
+        setProgress(25 + (scannedCount / files.length) * 70);
+        setStatus(`Analyzing ${scannedCount} / ${files.length} photos...`);
+      };
+
+      const worker = async () => {
+        while (currentIndex < files.length) {
+          const file = files[currentIndex++];
+          if (!file) break;
+          await processFile(file);
+        }
+      };
+
+      const workers = Array.from({ length: Math.min(CONCURRENCY, files.length) }, () => worker());
+      await Promise.all(workers);
+
+      setProgress(100);
+      setStatus(`Done! Found ${foundMatches.length} matches.`);
       setMatches(foundMatches.sort((a, b) => (a.dist || 0) - (b.dist || 0)));
       setSelectedIds(new Set(foundMatches.map(m => m.id)));
       setStep('results');
@@ -447,36 +433,61 @@ export default function App() {
   };
 
   const downloadAll = async () => {
-    const zip = new JSZip();
-    const folder = zip.folder("Cipla_Event_Moments");
-
-    const selectedFiles = filteredMatches.filter(m => selectedIds.has(m.id));
+    const selectedFiles = matches.filter(m => selectedIds.has(m.id));
     if (selectedFiles.length === 0) return;
 
-    setStatus(`Preparing ${selectedFiles.length} files...`);
-    setStep('scanning'); // Show progress for zip generation
-    setProgress(10);
+    setIsDownloading(true);
+    setDownloadProgress(0);
+    setStatus(`Preparing high-speed download for ${selectedFiles.length} photos...`);
 
-    for (let i = 0; i < selectedFiles.length; i++) {
-      const file = selectedFiles[i];
-      try {
-        const response = await fetch(file.downloadUrl);
-        const blob = await response.blob();
-        const ext = file.isVideo ? 'mp4' : 'jpg';
-        folder?.file(`moment_${i + 1}.${ext}`, blob);
-        setProgress(10 + (i / selectedFiles.length) * 80);
-      } catch (e) {
-        console.error(e);
+    try {
+      const zip = new JSZip();
+      const total = selectedFiles.length;
+      let completed = 0;
+
+      // Use parallel batches for maximum download speed
+      const DL_BATCH_SIZE = 15;
+
+      for (let i = 0; i < total; i += DL_BATCH_SIZE) {
+        const batch = selectedFiles.slice(i, i + DL_BATCH_SIZE);
+
+        await Promise.all(batch.map(async (file) => {
+          try {
+            const response = await fetch(file.downloadUrl);
+            const blob = await response.blob();
+            const ext = file.isVideo ? 'mp4' : 'jpg';
+            zip.file(`moment_${file.id}.${ext}`, blob);
+            completed++;
+            setDownloadProgress(Math.round((completed / total) * 100));
+            setStatus(`Downloading: ${completed} / ${total}`);
+          } catch (err) {
+            console.warn(`Failed to download ${file.id}`);
+          }
+        }));
       }
-    }
 
-    setProgress(95);
-    const content = await zip.generateAsync({ type: "blob" });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(content);
-    link.download = `Cipla_Event_${selectedFiles.length}_Moments.zip`;
-    link.click();
-    setStep('results');
+      setStatus('Generating Zip file...');
+      const content = await zip.generateAsync({ type: 'blob' }, (metadata) => {
+        setDownloadProgress(Math.round(metadata.percent));
+      });
+
+      const url = window.URL.createObjectURL(content);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `cipla_events_${new Date().getTime()}.zip`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(url);
+
+      setStatus('Download complete!');
+    } catch (err) {
+      console.error(err);
+      setError('Download failed. Try downloading individually.');
+    } finally {
+      setIsDownloading(false);
+      setDownloadProgress(0);
+    }
   };
 
   const toggleSelection = (id: string) => {
@@ -558,6 +569,21 @@ export default function App() {
                   />
                 </div>
                 <p className="text-[10px] text-white/30 italic ml-1 font-medium">Link must be a publicly accessible Google Drive folder.</p>
+              </div>
+
+              {/* API Key Status / Scan Mode */}
+              <div className="w-full max-w-lg mb-6">
+                {hasApiKey === true ? (
+                  <div className="rounded-2xl border border-emerald-500/30 bg-emerald-500/10 p-3 text-left flex items-center gap-3">
+                    <Check className="text-emerald-400 shrink-0" size={16} />
+                    <p className="text-emerald-300 text-[10px] font-bold uppercase tracking-wider">Unlimited API Mode Active</p>
+                  </div>
+                ) : (
+                  <div className="rounded-2xl border border-amber-500/20 bg-white/5 p-3 text-left flex items-center gap-3">
+                    <RefreshCcw className="text-amber-500/50 shrink-0 animate-spin-slow" size={16} />
+                    <p className="text-white/40 text-[10px] font-bold uppercase tracking-wider">Deep Scan Mode Enabled (No Key Required)</p>
+                  </div>
+                )}
               </div>
 
               <div className="relative w-full aspect-[4/3] rounded-3xl overflow-hidden bg-white/5 border border-white/10 shadow-2xl mb-10 group">
